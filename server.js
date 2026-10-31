@@ -1,302 +1,280 @@
-// Prism: zero-dependency web proxy. Needs Node 20+.
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
+'use strict';
+// Cipher Prism proxy — private, security-hardened testing build.
+// Compatible with the original /p/, /search and public/ endpoints.
+// For public launch replace the shared staging password with real per-user Cipher authentication.
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { gate, acquireSlot, guardedFetch, MAX_REQUEST_BYTES } = require('./security-gateway');
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const PREFIX = '/p/';
-
-// ---- Look like a normal, recent desktop Chrome in Australia ----
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const BASE_HEADERS = {
   'user-agent': UA,
   'accept-language': 'en-AU,en;q=0.9',
-  'accept-encoding': 'gzip, deflate, br',
-  'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-  'sec-ch-ua-mobile': '?0',
-  'sec-ch-ua-platform': '"Windows"',
+  'accept': '*/*',
+  'accept-encoding': 'identity',
 };
 
-// ---------- URL helpers ----------
-const toProxy = (url, base) => {
+function toProxy(input, base) {
   try {
-    const abs = new URL(url, base);
-    if (!/^https?:$/.test(abs.protocol)) return url;
-    return PREFIX + encodeURIComponent(abs.href);
-  } catch { return url; }
-};
-const fromProxyUrl = (u) => {           // "http://me/p/<enc>" -> real url (or null)
+    const u = new URL(input, base);
+    if (!/^https?:$/.test(u.protocol)) return input;
+    return PREFIX + encodeURIComponent(u.href);
+  } catch { return input; }
+}
+function fromProxyUrl(input) {
   try {
-    const x = new URL(u, 'http://x');
-    if (!x.pathname.startsWith(PREFIX)) return null;
-    return decodeURIComponent(x.pathname.slice(PREFIX.length));
+    const url = new URL(input, 'http://invalid.local');
+    if (!url.pathname.startsWith(PREFIX)) return null;
+    const t = new URL(decodeURIComponent(url.pathname.slice(PREFIX.length)));
+    return /^https?:$/.test(t.protocol) ? t.href : null;
   } catch { return null; }
-};
+}
+function error(res, code, msg, headers = {}) {
+  if (res.headersSent) { res.destroy(); return; }
+  res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers });
+  res.end(msg);
+}
 
-// ---------- per-user cookie jars (sessions persist => fewer challenges) ----------
-const sessions = new Map(); // sid -> { jar: Map, seen: ms }
-function getSession(req, res) {
-  const m = /(?:^|;\s*)prism_sid=([a-f0-9]{32})/.exec(req.headers.cookie || '');
-  let sid = m && m[1];
+// Each browser visitor has an independent in-memory cookie jar; no caching is shared.
+const sessions = new Map();
+const MAX_SESSIONS = 100;
+function sessionFor(req, res) {
+  const found = /(?:^|;\s*)prism_sid=([a-f0-9]{32})(?:;|$)/.exec(req.headers.cookie || '');
+  let sid = found?.[1];
   if (!sid || !sessions.has(sid)) {
     sid = crypto.randomBytes(16).toString('hex');
+    if (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
     sessions.set(sid, { jar: new Map(), seen: Date.now() });
-    res.setHeader('set-cookie', `prism_sid=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
+    // Partitioned cookies are intended for Chromium's cross-site iframe handling.
+    // A browser may reject third-party cookies; the fallback is to open separately.
+    res.setHeader('set-cookie', `prism_sid=${sid}; Path=/; HttpOnly; Secure; SameSite=None; Partitioned; Max-Age=86400`);
   }
   const s = sessions.get(sid);
   s.seen = Date.now();
   return s;
 }
-setInterval(() => {                       // forget idle sessions after 24h
-  const cutoff = Date.now() - 24 * 3600e3;
+setInterval(() => {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   for (const [k, v] of sessions) if (v.seen < cutoff) sessions.delete(k);
-}, 3600e3).unref();
-
+}, 3600000).unref();
 function storeCookies(session, targetUrl, setCookies) {
   const u = new URL(targetUrl);
   for (const line of setCookies) {
-    const parts = line.split(';').map(s => s.trim());
+    if (typeof line !== 'string') continue;
+    const parts = line.split(';').map(x => x.trim());
     const eq = parts[0].indexOf('=');
     if (eq < 1) continue;
     const c = { name: parts[0].slice(0, eq), value: parts[0].slice(eq + 1), domain: u.hostname, hostOnly: true, path: '/', secure: false, expires: 0 };
     for (const attr of parts.slice(1)) {
-      const [k, ...v] = attr.split('=');
-      const val = v.join('=');
-      switch (k.toLowerCase()) {
-        case 'domain': c.domain = val.replace(/^\./, '').toLowerCase(); c.hostOnly = false; break;
-        case 'path': c.path = val || '/'; break;
-        case 'secure': c.secure = true; break;
-        case 'max-age': c.expires = Date.now() + parseInt(val, 10) * 1000; break;
-        case 'expires': if (!c.expires) { const t = Date.parse(val); if (!isNaN(t)) c.expires = t; } break;
+      const [raw, ...rest] = attr.split('=');
+      const k = raw.toLowerCase(), val = rest.join('=');
+      if (k === 'domain') { // Ignore Domain attributes in private staging: prevent public-suffix/sibling-domain cookie injection.
+        // Preserving only host-bound cookies means some cross-subdomain logins may not work.
+        continue;
       }
+      else if (k === 'path') c.path = val || '/';
+      else if (k === 'secure') c.secure = true;
+      else if (k === 'max-age') { const n = Number(val); if (Number.isFinite(n)) c.expires = Date.now() + n * 1000; }
+      else if (k === 'expires' && !c.expires) { const t = Date.parse(val); if (!Number.isNaN(t)) c.expires = t; }
     }
     if (!c.hostOnly && !(u.hostname === c.domain || u.hostname.endsWith('.' + c.domain))) continue;
     const key = `${c.domain}|${c.path}|${c.name}`;
-    if ((c.expires && c.expires < Date.now()) || c.value === '') session.jar.delete(key);
+    if ((c.expires && c.expires <= Date.now()) || c.value === '') session.jar.delete(key);
     else session.jar.set(key, c);
+    if (session.jar.size > 150) session.jar.delete(session.jar.keys().next().value);
   }
-  if (session.jar.size > 400) session.jar.delete(session.jar.keys().next().value);
 }
 function cookieHeader(session, targetUrl) {
   const u = new URL(targetUrl);
-  const out = [];
+  const matches = [];
   for (const [key, c] of session.jar) {
     if (c.expires && c.expires < Date.now()) { session.jar.delete(key); continue; }
-    const hostOk = c.hostOnly ? u.hostname === c.domain : (u.hostname === c.domain || u.hostname.endsWith('.' + c.domain));
-    if (hostOk && u.pathname.startsWith(c.path) && (!c.secure || u.protocol === 'https:')) out.push(`${c.name}=${c.value}`);
+    if ((c.hostOnly ? u.hostname === c.domain : u.hostname === c.domain || u.hostname.endsWith('.' + c.domain)) &&
+        u.pathname.startsWith(c.path) && (!c.secure || u.protocol === 'https:')) matches.push(`${c.name}=${c.value}`);
   }
-  return out.join('; ');
+  return matches.join('; ');
 }
 
-// ---------- tiny cache for static files (fewer requests to sites = fewer flags) ----------
-const cache = new Map(); // url -> { status, headers, body, exp }
-const CACHE_MAX = 300, CACHE_TTL = 10 * 60e3, CACHE_ITEM_MAX = 2 * 1024 * 1024;
-const cacheable = (type) => /^(image\/|font\/|text\/javascript|application\/javascript|application\/x-javascript|application\/font|application\/vnd\.ms-fontobject)/.test(type);
-function cacheGet(k) {
-  const e = cache.get(k);
-  if (!e) return null;
-  if (e.exp < Date.now()) { cache.delete(k); return null; }
-  cache.delete(k); cache.set(k, e); // refresh LRU order
-  return e;
-}
-function cachePut(k, e) {
-  cache.set(k, e);
-  while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
-}
-
-// ---------- rewriting ----------
+// HTML rewriting remains compatible with the original Cipher Prism client.js.
 function rewriteCSS(css, base) {
-  return css
-    .replace(/url\(\s*(['"]?)(?!data:|#)([^'")]+)\1\s*\)/gi, (_, q, u) => `url(${q}${toProxy(u.trim(), base)}${q})`)
+  return css.replace(/url\(\s*(['"]?)(?!data:|#)([^'")]+)\1\s*\)/gi, (_, q, u) => `url(${q}${toProxy(u.trim(), base)}${q})`)
     .replace(/@import\s+(['"])([^'"]+)\1/gi, (_, q, u) => `@import ${q}${toProxy(u, base)}${q}`);
 }
 function rewriteHTML(html, base) {
-  html = html
-    .replace(/<meta[^>]+http-equiv=["']?(content-security-policy|x-frame-options)["']?[^>]*>/gi, '')
-    .replace(/\s(integrity|nonce)=("[^"]*"|'[^']*')/gi, '');
+  html = html.replace(/<meta[^>]+http-equiv=["']?(content-security-policy|x-frame-options)["']?[^>]*>/gi, '')
+    .replace(/\s(integrity|nonce)=(["'][^"']*["'])/gi, '');
   html = html.replace(/(\s(?:href|src|action|poster|data-src|formaction)=)(["'])(.*?)\2/gi, (m, attr, q, val) => {
     if (/^(#|javascript:|data:|mailto:|tel:|blob:)/i.test(val.trim())) return m;
     return `${attr}${q}${toProxy(val.trim().replace(/&amp;/g, '&'), base)}${q}`;
   });
-  html = html.replace(/(\ssrcset=)(["'])(.*?)\2/gi, (m, attr, q, val) => {
+  html = html.replace(/(\ssrcset=)(["'])(.*?)\2/gi, (_m, attr, q, val) => {
     const out = val.split(',').map(part => {
       const [u, ...rest] = part.trim().split(/\s+/);
       return [toProxy(u, base), ...rest].join(' ');
     }).join(', ');
     return `${attr}${q}${out}${q}`;
   });
-  html = html.replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/gi, (m, a, css, b) => a + rewriteCSS(css, base) + b);
-  html = html.replace(/(\sstyle=)(["'])(.*?)\2/gi, (m, a, q, css) => a + q + rewriteCSS(css, base) + q);
-  html = html.replace(/(<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["'][^"']*url=)([^"']+)/gi, (m, a, u) => a + toProxy(u, base));
-  const inject = `<script>window.__PROXY_BASE=${JSON.stringify(base)};</script><script src="/client.js"></script>`;
-  if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, m => m + inject);
-  return inject + html;
+  html = html.replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/gi, (_m, a, css, b) => a + rewriteCSS(css, base) + b);
+  html = html.replace(/(\sstyle=)(["'])(.*?)\2/gi, (_m, a, q, css) => a + q + rewriteCSS(css, base) + q);
+  html = html.replace(/(<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["'][^"']*url=)([^"']+)/gi, (_m, a, u) => a + toProxy(u, base));
+  const inject = `<script>window.__PROXY_BASE=${JSON.stringify(base).replace(/</g, '\\u003c')};</script><script src="/client.js"></script>`;
+  return /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, m => m + inject) : inject + html;
 }
 
-// ---------- the proxy ----------
+async function readBody(req) {
+  const n = Number(req.headers['content-length']);
+  if (Number.isFinite(n) && n > MAX_REQUEST_BYTES) throw Object.assign(new Error('Large request'), { status: 413 });
+  let size = 0;
+  const parts = [];
+  for await (const b of req) {
+    size += b.length;
+    if (size > MAX_REQUEST_BYTES) throw Object.assign(new Error('Large request'), { status: 413 });
+    parts.push(b);
+  }
+  return parts.length ? Buffer.concat(parts) : undefined;
+}
 async function handleProxy(req, res) {
-  const qIndex = req.url.indexOf('?');
-  const rawPath = qIndex === -1 ? req.url : req.url.slice(0, qIndex);
-  const extraQuery = qIndex === -1 ? '' : req.url.slice(qIndex);
-  let target, tu;
+  if (!['GET', 'HEAD', 'POST'].includes(req.method)) return error(res, 405, 'Method not permitted');
+  const idx = req.url.indexOf('?');
+  const raw = idx === -1 ? req.url : req.url.slice(0, idx);
+  const extra = idx === -1 ? '' : req.url.slice(idx);
+  let tu;
   try {
-    tu = new URL(decodeURIComponent(rawPath.slice(PREFIX.length)));
-    if (extraQuery) tu.search = extraQuery;
-    if (!/^https?:$/.test(tu.protocol)) throw new Error('bad protocol');
-    target = tu.href;
-  } catch {
-    res.writeHead(400, { 'content-type': 'text/plain' });
-    return res.end('Bad URL');
-  }
-
-  const session = getSession(req, res);
-  const isGet = req.method === 'GET';
-
-  // serve static files from cache
-  if (isGet && !req.headers.range) {
-    const hit = cacheGet(target);
-    if (hit) { res.writeHead(hit.status, hit.headers); return res.end(hit.body); }
-  }
-
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
-  const body = chunks.length ? Buffer.concat(chunks) : undefined;
-
-  // ---- build browser-like headers ----
+    tu = new URL(decodeURIComponent(raw.slice(PREFIX.length)));
+    if (extra) tu.search = extra;
+    if (!/^https?:$/.test(tu.protocol)) throw new Error('Protocol');
+  } catch { return error(res, 400, 'Invalid website URL'); }
+  const target = tu.href;
+  const session = sessionFor(req, res);
+  let body;
+  try { body = await readBody(req); }
+  catch (e) { return error(res, e.status || 400, 'Request body too large'); }
   const dest = req.headers['sec-fetch-dest'] || 'document';
-  const refererReal = fromProxyUrl(req.headers['referer'] || '');
-  const headers = { ...BASE_HEADERS, accept: req.headers['accept'] || '*/*' };
+  const referer = fromProxyUrl(req.headers.referer || '');
+  const headers = { ...BASE_HEADERS, accept: req.headers.accept || '*/*' };
   headers['sec-fetch-dest'] = dest;
   headers['sec-fetch-mode'] = req.headers['sec-fetch-mode'] || (dest === 'document' ? 'navigate' : 'no-cors');
   if (dest === 'document') headers['upgrade-insecure-requests'] = '1';
-  if (refererReal) {
-    const ro = new URL(refererReal);
-    headers['referer'] = refererReal;
-    headers['sec-fetch-site'] = ro.origin === tu.origin ? 'same-origin' : (ro.hostname.split('.').slice(-2).join('.') === tu.hostname.split('.').slice(-2).join('.') ? 'same-site' : 'cross-site');
-    if (!isGet && req.method !== 'HEAD') headers['origin'] = ro.origin;
+  if (referer) {
+    const from = new URL(referer);
+    headers.referer = referer;
+    headers['sec-fetch-site'] = from.origin === tu.origin ? 'same-origin' : 'cross-site';
+    if (req.method === 'POST') headers.origin = from.origin;
   } else {
     headers['sec-fetch-site'] = 'none';
-    if (!isGet && req.method !== 'HEAD') headers['origin'] = tu.origin;
+    if (req.method === 'POST') headers.origin = tu.origin;
   }
-  if (dest === 'document' && headers['sec-fetch-site'] === 'none') headers['sec-fetch-user'] = '?1';
   if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
-  if (req.headers['range']) headers['range'] = req.headers['range'];
-  const ck = cookieHeader(session, target);
-  if (ck) headers['cookie'] = ck;
+  if (req.headers.range) headers.range = req.headers.range;
+  const cookies = cookieHeader(session, target);
+  if (cookies) headers.cookie = cookies;
 
   let upstream;
-  try {
-    upstream = await fetch(target, { method: req.method, headers, body: ['GET', 'HEAD'].includes(req.method) ? undefined : body, redirect: 'manual' });
-  } catch (e) {
-    res.writeHead(502, { 'content-type': 'text/html' });
-    return res.end(`<body style="font-family:sans-serif;padding:2rem"><h2>Couldn't load that page</h2><p>${String(e.cause?.code || e.message)}</p><a href="/">Back</a></body>`);
-  }
+  try { upstream = await guardedFetch(target, { method: req.method, headers, body }); }
+  catch (e) { return error(res, e.code === 'BLOCKED_TARGET' ? 403 : 502, e.code === 'BLOCKED_TARGET' ? 'This website is not permitted.' : 'This website could not be loaded.'); }
 
-  // save cookies the site sent (in the server-side jar, per user)
-  const sc = typeof upstream.headers.getSetCookie === 'function' ? upstream.headers.getSetCookie() : [];
-  if (sc.length) storeCookies(session, target, sc);
-
-  const out = {};
-  upstream.headers.forEach((v, k) => {
-    if (['content-security-policy', 'content-security-policy-report-only', 'x-frame-options', 'content-encoding',
-         'content-length', 'transfer-encoding', 'strict-transport-security', 'set-cookie', 'connection',
-         'cross-origin-opener-policy', 'cross-origin-embedder-policy', 'cross-origin-resource-policy'].includes(k)) return;
-    out[k] = v;
-  });
-  // keep our own session cookie header if getSession just made one
-  const mine = res.getHeader('set-cookie');
-  if (mine) out['set-cookie'] = mine;
-
-  if (upstream.status >= 300 && upstream.status < 400 && upstream.headers.get('location')) {
+  const setCookies = typeof upstream.headers.getSetCookie === 'function' ? upstream.headers.getSetCookie() : [];
+  if (setCookies.length) storeCookies(session, target, setCookies);
+  const out = { 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff' };
+  const rejected = new Set(['content-security-policy','content-security-policy-report-only','x-frame-options','content-encoding','content-length','transfer-encoding','strict-transport-security','set-cookie','connection','cross-origin-opener-policy','cross-origin-embedder-policy','cross-origin-resource-policy','content-disposition','refresh']);
+  upstream.headers.forEach((v, k) => { if (!rejected.has(k.toLowerCase())) out[k] = v; });
+  // Preserve the server's own per-browser session cookie.
+  const issued = res.getHeader('set-cookie');
+  if (issued) out['set-cookie'] = issued;
+  if (upstream.status >= 300 && upstream.status < 400 && upstream.headers.has('location')) {
     out.location = toProxy(upstream.headers.get('location'), target);
     res.writeHead(upstream.status, out);
     return res.end();
   }
-
-  const type = (upstream.headers.get('content-type') || '').toLowerCase();
-  if (type.includes('text/html')) {
+  const mime = (upstream.headers.get('content-type') || '').toLowerCase();
+  if (mime.includes('text/html')) {
     const html = rewriteHTML(await upstream.text(), target);
-    out['content-type'] = 'text/html; charset=utf-8';
-    res.writeHead(upstream.status, out);
-    return res.end(html);
+    res.writeHead(upstream.status, { ...out, 'content-type': 'text/html; charset=utf-8' });
+    return req.method === 'HEAD' ? res.end() : res.end(html);
   }
-  if (type.includes('text/css')) {
+  if (mime.includes('text/css')) {
     const css = rewriteCSS(await upstream.text(), target);
     res.writeHead(upstream.status, out);
-    return res.end(css);
+    return req.method === 'HEAD' ? res.end() : res.end(css);
   }
-
-  // static files: buffer small ones and cache them
-  const len = parseInt(upstream.headers.get('content-length') || '0', 10);
-  if (isGet && upstream.status === 200 && !req.headers.range && cacheable(type) && (!len || len < CACHE_ITEM_MAX)) {
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    if (buf.length < CACHE_ITEM_MAX) {
-      const h = { ...out, 'content-length': buf.length };
-      delete h['set-cookie'];
-      cachePut(target, { status: 200, headers: h, body: buf, exp: Date.now() + CACHE_TTL });
-      res.writeHead(200, { ...h, ...(mine ? { 'set-cookie': mine } : {}) });
-      return res.end(buf);
-    }
-    res.writeHead(200, out);
-    return res.end(buf);
-  }
-
-  // everything else streams straight through
   res.writeHead(upstream.status, out);
-  if (!upstream.body) return res.end();
+  if (!upstream.body || req.method === 'HEAD') return res.end();
   const reader = upstream.body.getReader();
   req.on('close', () => reader.cancel().catch(() => {}));
-  try { for (;;) { const { done, value } = await reader.read(); if (done) break; res.write(value); } } catch {}
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done || res.destroyed) break;
+      if (!res.write(value)) await new Promise(resolve => res.once('drain', resolve));
+    }
+  } catch { res.destroy(); return; }
   res.end();
 }
 
-// ---------- static files ----------
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png' };
+const STATIC_ROOT = path.resolve(__dirname, 'public');
 function serveStatic(req, res) {
-  let p = req.url.split('?')[0];
-  if (p === '/') p = '/index.html';
-  const file = path.join(__dirname, 'public', path.normalize(p).replace(/^(\.\.[\/\\])+/, ''));
-  if (!file.startsWith(path.join(__dirname, 'public'))) { res.writeHead(403); return res.end(); }
+  if (!['GET','HEAD'].includes(req.method)) return error(res, 405, 'Method not permitted');
+  let urlPath;
+  try { urlPath = decodeURIComponent(new URL(req.url, 'http://invalid.local').pathname); }
+  catch { return error(res, 400, 'Bad path'); }
+  if (urlPath === '/') urlPath = '/index.html';
+  const file = path.resolve(STATIC_ROOT, '.' + urlPath);
+  if (file !== STATIC_ROOT && !file.startsWith(STATIC_ROOT + path.sep)) return error(res, 403, 'Not permitted');
   fs.readFile(file, (err, data) => {
-    if (err) { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('Not found'); }
-    res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
-    res.end(data);
+    if (err) return error(res, 404, 'Not found');
+    res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    res.end(req.method === 'HEAD' ? undefined : data);
   });
 }
 
-
-// ---------- search: DuckDuckGo first, fall back if the host blocks it ----------
+// Search engine shortcuts: same /search endpoint as the original Prism app.
 const ENGINES = [
-  q => 'https://html.duckduckgo.com/html/?q=' + q,
-  q => 'https://lite.duckduckgo.com/lite/?q=' + q,
-  q => 'https://www.bing.com/search?q=' + q,
-  q => 'https://search.brave.com/search?q=' + q,
+  q => `https://html.duckduckgo.com/html/?q=${q}`,
+  q => `https://lite.duckduckgo.com/lite/?q=${q}`,
+  q => `https://www.bing.com/search?q=${q}`,
+  q => `https://search.brave.com/search?q=${q}`,
 ];
-const engineDown = new Map(); // engine index -> skip until (ms)
+const engineDown = new Map();
 let lastGood = -1, lastGoodUntil = 0;
 async function handleSearch(req, res) {
-  const q = (new URL(req.url, 'http://x').searchParams.get('q') || '').trim();
-  if (!q) { res.writeHead(302, { location: '/' }); return res.end(); }
-  const eq = encodeURIComponent(q);
-  let chosen = -1;
-  if (lastGood >= 0 && lastGoodUntil > Date.now()) chosen = lastGood;
+  if (req.method !== 'GET') return error(res, 405, 'Method not permitted');
+  const query = (new URL(req.url, 'http://invalid.local').searchParams.get('q') || '').trim().slice(0, 256);
+  if (!query) { res.writeHead(302, { location: '/' }); return res.end(); }
+  const eq = encodeURIComponent(query);
+  let chosen = lastGoodUntil > Date.now() ? lastGood : -1;
   for (let i = 0; chosen < 0 && i < ENGINES.length; i++) {
     if ((engineDown.get(i) || 0) > Date.now()) continue;
     try {
-      const r = await fetch(ENGINES[i](eq), { headers: { ...BASE_HEADERS, accept: 'text/html' }, redirect: 'manual', signal: AbortSignal.timeout(4000) });
-      const t = await r.text();
-      if (r.status === 200 && !/anomaly|captcha|unusual traffic/i.test(t)) { chosen = i; lastGood = i; lastGoodUntil = Date.now() + 5 * 60e3; break; }
-      engineDown.set(i, Date.now() + 5 * 60e3);
-    } catch { engineDown.set(i, Date.now() + 5 * 60e3); }
+      const resp = await guardedFetch(ENGINES[i](eq), { method: 'GET', headers: { ...BASE_HEADERS, accept: 'text/html' } });
+      const t = await resp.text();
+      if (resp.status === 200 && !/anomaly|captcha|unusual traffic/i.test(t)) {
+        chosen = i; lastGood = i; lastGoodUntil = Date.now() + 300000;
+        break;
+      }
+    } catch { /* Try next engine. */ }
+    engineDown.set(i, Date.now() + 300000);
   }
   if (chosen < 0) chosen = ENGINES.length - 1;
-  res.writeHead(302, { location: PREFIX + encodeURIComponent(ENGINES[chosen](eq)) });
+  res.writeHead(302, { location: PREFIX + encodeURIComponent(ENGINES[chosen](eq)), 'cache-control': 'no-store' });
   res.end();
 }
 
-http.createServer((req, res) => {
-  if (req.url.startsWith(PREFIX)) return handleProxy(req, res).catch(e => { try { res.writeHead(500); res.end('Error: ' + e.message); } catch {} });
-  if (req.url.startsWith('/search')) return handleSearch(req, res).catch(() => { res.writeHead(302, { location: '/' }); res.end(); });
-  serveStatic(req, res);
-}).listen(PORT, () => console.log('Prism running on http://localhost:' + PORT));
+// Access gate applies to ALL routes, including /p/, /search and static resources.
+const server = http.createServer((req, res) => {
+  if (!gate(req, res)) return;
+  if (req.url.startsWith(PREFIX) || req.url.startsWith('/search')) {
+    const release = acquireSlot(req, res);
+    if (!release) return;
+    const task = req.url.startsWith(PREFIX) ? handleProxy(req, res) : handleSearch(req, res);
+    return Promise.resolve(task).catch(() => error(res, 502, 'Request failed.')).finally(release);
+  }
+  return serveStatic(req, res);
+});
+server.requestTimeout = 20000;
+server.headersTimeout = 15000;
+server.listen(PORT, '0.0.0.0', () => console.log(`Cipher Prism private testing service listening on port ${PORT}`));
