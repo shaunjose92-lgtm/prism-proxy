@@ -40,4 +40,22 @@
     if (a && a.indexOf('/p/') !== 0) form.setAttribute('action', a);
     else if (!a) form.setAttribute('action', px(BASE));
   }, true);
+
+  // Cipher watermark, bottom-right corner of every proxied page (top window only)
+  try {
+    if (window.top === window) {
+      var addWM = function () {
+        if (document.getElementById('__cipher_wm')) return;
+        var w = document.createElement('div');
+        w.id = '__cipher_wm';
+        w.textContent = 'Cipher';
+        w.setAttribute('aria-hidden', 'true');
+        w.style.cssText = 'position:fixed;right:14px;bottom:10px;z-index:2147483647;pointer-events:none;user-select:none;' +
+          'font:italic 500 15px Georgia,"Times New Roman",serif;letter-spacing:.2px;color:rgba(140,155,115,.8);opacity:.55;' +
+          'text-shadow:0 0 3px rgba(0,0,0,.55),0 0 3px rgba(255,255,255,.35);';
+        (document.body || document.documentElement).appendChild(w);
+      };
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', addWM); else addWM();
+    }
+  } catch (e) {}
 })();

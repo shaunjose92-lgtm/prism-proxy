@@ -1,83 +1,140 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cipher Browser</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;0,8..60,700;1,8..60,400;1,8..60,500&family=Inter:wght@400;450;500;600;700&display=swap" rel="stylesheet">
+<script>
+  try { document.documentElement.setAttribute('data-theme', localStorage.getItem('cipher-theme') || 'dark'); } catch (e) {}
+</script>
 <style>
-  :root { --bg:#080a12; --glass:rgba(255,255,255,.07); --glass-hi:rgba(255,255,255,.13); --line:rgba(255,255,255,.14); --text:#eef0fb; --muted:#9aa1bf; --accent:#8b7bff; --accent2:#4fd1ff; }
-  @media (prefers-color-scheme: light) {
-    :root { --bg:#eef0fa; --glass:rgba(255,255,255,.6); --glass-hi:rgba(255,255,255,.9); --line:rgba(30,35,70,.12); --text:#151830; --muted:#5d6385; --accent:#5b4bf0; --accent2:#0b9fd6; }
+  :root {
+    --bg:#f4f1e9; --paper:#fbf8f1; --panel:rgba(43,38,32,.04); --panel-2:rgba(43,38,32,.065);
+    --line:#e3dcc9; --text:#2b2620; --text-dim:#6a6358; --text-faint:#9a948a;
+    --sage:#7a8a62; --sage-deep:#566244; --sage-soft:rgba(122,138,98,.16); --clay:#c98a8a;
+    --accent-glow:rgba(122,138,98,.32); --grad-signal:linear-gradient(135deg,#8b9a72 0%,#7a8a62 55%,#566244 100%);
+    --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    --display:'Source Serif 4','Iowan Old Style','Palatino Linotype',Georgia,serif;
+    --ease-out:cubic-bezier(.16,1,.3,1);
   }
-  * { box-sizing: border-box; }
-  html, body { margin:0; min-height:100%; }
-  body { min-height:100vh; display:grid; place-items:center; padding:2rem 1rem; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; overflow-x:hidden; position:relative; }
-  .blob { position:fixed; border-radius:50%; filter:blur(80px); opacity:.45; z-index:0; pointer-events:none; animation:float 18s ease-in-out infinite alternate; }
-  .b1 { width:42vmax; height:42vmax; background:var(--accent); top:-14vmax; left:-10vmax; }
-  .b2 { width:36vmax; height:36vmax; background:var(--accent2); bottom:-14vmax; right:-8vmax; animation-delay:-6s; }
-  @keyframes float { to { transform:translate(4vmax,3vmax) scale(1.08); } }
-  @media (prefers-reduced-motion: reduce) { .blob { animation:none; } }
-  main { position:relative; z-index:1; width:min(680px,100%); text-align:center; }
-  .brand { display:inline-flex; align-items:center; gap:.6rem; font-weight:700; letter-spacing:.02em; color:var(--muted); margin-bottom:1.2rem; }
-  .logo { width:30px; height:30px; border-radius:10px; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 4px 16px color-mix(in srgb,var(--accent) 50%,transparent); }
-  h1 { font-size:clamp(2rem,6vw,3.2rem); margin:0 0 .4rem; letter-spacing:-.03em; line-height:1.1; }
-  p.sub { color:var(--muted); margin:0 0 1.8rem; }
-  form { display:flex; gap:.5rem; padding:.5rem; border-radius:20px; background:var(--glass); border:1px solid var(--line); backdrop-filter:blur(22px) saturate(160%); -webkit-backdrop-filter:blur(22px) saturate(160%); box-shadow:0 12px 44px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.12); }
-  form:focus-within { border-color:var(--accent); }
-  input { flex:1; min-width:0; border:0; background:transparent; color:var(--text); font-size:1.02rem; padding:.85rem 1rem; outline:none; }
-  input::placeholder { color:var(--muted); }
-  button.go { border:0; border-radius:14px; padding:0 1.5rem; background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; font-weight:700; font-size:1rem; cursor:pointer; }
-  button.go:hover { filter:brightness(1.1); }
-  .label { text-align:left; color:var(--muted); font-size:.8rem; letter-spacing:.08em; text-transform:uppercase; margin:2rem 0 .7rem .3rem; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(92px,1fr)); gap:.7rem; }
-  .tile { display:flex; flex-direction:column; align-items:center; gap:.5rem; padding:.9rem .4rem; border-radius:18px; text-decoration:none; color:var(--text); font-size:.86rem; background:var(--glass); border:1px solid var(--line); backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px); transition:transform .15s, background .15s, border-color .15s; }
-  .tile:hover { transform:translateY(-3px); background:var(--glass-hi); border-color:var(--accent); }
-  .ico { width:42px; height:42px; border-radius:13px; display:grid; place-items:center; color:#fff; font-weight:800; font-size:1.1rem; box-shadow:0 4px 14px rgba(0,0,0,.25); }
-  small { display:block; margin-top:1.8rem; color:var(--muted); font-size:.82rem; }
+  [data-theme="dark"] {
+    --bg:#2a2620; --paper:#2f2a23; --panel:rgba(237,229,212,.04); --panel-2:rgba(237,229,212,.065);
+    --line:#3a342c; --text:#ede5d4; --text-dim:#a39a8a; --text-faint:#7a7264;
+    --sage:#97a67d; --sage-deep:#b3c194; --sage-soft:rgba(151,166,125,.16); --clay:#d8a3a3;
+    --accent-glow:rgba(151,166,125,.30); --grad-signal:linear-gradient(135deg,#a8b88e 0%,#97a67d 55%,#778660 100%);
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; }
+  body { min-height:100vh; background:var(--bg); color:var(--text); font:14.5px/1.55 var(--sans); -webkit-font-smoothing:antialiased; position:relative; overflow-x:hidden; display:grid; place-items:center; padding:clamp(20px,4vw,44px) 16px 70px; }
+  body::before { content:''; position:fixed; inset:-10%; z-index:0; pointer-events:none;
+    background:radial-gradient(60vw 60vw at 12% 8%,rgba(201,168,106,.10),transparent 60%),radial-gradient(50vw 50vw at 92% 18%,rgba(189,122,92,.08),transparent 62%),radial-gradient(55vw 55vw at 70% 100%,var(--sage-soft),transparent 60%); }
+  main { position:relative; z-index:1; width:min(760px,100%); animation:up .7s var(--ease-out) both; }
+  @keyframes up { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:none; } }
+  @media (prefers-reduced-motion:reduce) { main { animation:none; } }
+
+  .brand { display:flex; align-items:center; gap:12px; margin-bottom:26px; }
+  .brand-mark { width:38px; height:38px; border-radius:11px; background:var(--sage); color:#fff; display:flex; align-items:center; justify-content:center; position:relative; transition:transform .4s var(--ease-out); }
+  .brand:hover .brand-mark { transform:rotate(-6deg) scale(1.04); }
+  .brand-mark svg { width:60%; height:60%; display:block; }
+  .brand-mark::after { content:''; position:absolute; inset:0; border-radius:inherit; box-shadow:inset 0 1px 0 rgba(255,255,255,.18), inset 0 -1px 0 rgba(0,0,0,.10); }
+  .brand-name { font:600 21px/1.1 var(--display); letter-spacing:-.2px; }
+  .brand-sub { font-size:11.5px; color:var(--text-faint); }
+  .theme { margin-left:auto; border:1px solid var(--line); background:var(--panel); color:var(--text-dim); border-radius:999px; padding:7px 13px; font:600 12px var(--sans); cursor:pointer; transition:background .2s, transform .2s var(--ease-out); }
+  .theme:hover { background:var(--sage-soft); transform:translateY(-1px); }
+
+  .eyebrow { margin:0; font:600 11.5px var(--sans); letter-spacing:.14em; text-transform:uppercase; color:var(--text-faint); }
+  h1 { margin:6px 0 20px; font:600 clamp(28px,5vw,40px)/1.08 var(--display); letter-spacing:-.015em; }
+  h1 em { font-style:italic; font-weight:500; color:var(--sage); }
+
+  form { display:flex; gap:8px; padding:7px; border-radius:999px; border:1px solid var(--line); background:linear-gradient(180deg,var(--panel-2),var(--panel)); box-shadow:0 18px 40px -26px rgba(0,0,0,.45); backdrop-filter:blur(10px) saturate(140%); -webkit-backdrop-filter:blur(10px) saturate(140%); transition:border-color .2s, box-shadow .2s; }
+  form:focus-within { border-color:var(--sage); box-shadow:0 0 0 3px var(--sage-soft), 0 18px 40px -26px rgba(0,0,0,.45); }
+  input { flex:1; min-width:0; border:0; background:transparent; color:var(--text); font:450 15px var(--sans); padding:11px 16px; outline:none; }
+  input::placeholder { color:var(--text-faint); }
+  button.go { border:0; border-radius:999px; padding:0 24px; color:#fff; background:var(--grad-signal); font:600 14px var(--sans); cursor:pointer; box-shadow:0 8px 18px -8px var(--accent-glow); transition:transform .2s var(--ease-out); }
+  button.go:hover { transform:translateY(-1px) scale(1.03); }
+  button.go:active { transform:scale(.97); }
+
+  .row { margin-top:22px; padding:16px 0 14px; border-radius:24px; border:1px solid var(--line); background:linear-gradient(180deg,var(--panel-2),var(--panel)); box-shadow:0 18px 40px -26px rgba(0,0,0,.45); position:relative; overflow:hidden; }
+  .row::before { content:''; position:absolute; inset:0 0 auto; height:90px; background:radial-gradient(60% 100% at 15% 0,var(--sage-soft),transparent); pointer-events:none; }
+  .row h3 { position:relative; margin:0; padding:0 20px 12px; font:600 19px/1.2 var(--display); }
+  .row h3 span { display:block; margin-top:3px; font:13px var(--sans); color:var(--text-dim); }
+  .grid { position:relative; display:grid; grid-template-columns:repeat(auto-fill,minmax(104px,1fr)); gap:10px; padding:0 16px 4px; }
+  .tile { display:flex; flex-direction:column; align-items:center; gap:9px; padding:14px 6px 12px; border-radius:16px; border:1px solid var(--line); background:var(--panel); color:var(--text); text-decoration:none; font:600 13px var(--sans); transition:transform .25s var(--ease-out), background .2s, border-color .2s; }
+  .tile:hover { transform:translateY(-3px); background:var(--sage-soft); border-color:var(--sage); }
+  .ico { width:40px; height:40px; border-radius:12px; display:grid; place-items:center; background:var(--sage-soft); color:var(--sage-deep); font:600 17px var(--display); box-shadow:inset 0 1px 0 rgba(255,255,255,.08); }
+  .tile:hover .ico { background:var(--sage); color:#fff; }
+  .note { margin-top:18px; text-align:center; color:var(--text-faint); font-size:12.5px; }
+
+  /* watermark, bottom-right corner */
+  .wm { position:fixed; right:18px; bottom:14px; z-index:5; pointer-events:none; user-select:none; display:flex; align-items:center; gap:7px; opacity:.5; font:italic 500 17px var(--display); color:var(--sage); letter-spacing:.2px; }
+  .wm i { width:9px; height:9px; border-radius:3px; background:var(--sage); display:block; }
 </style>
 </head>
 <body>
-<div class="blob b1"></div><div class="blob b2"></div>
 <main>
-  <div class="brand"><span class="logo"></span>Cipher Browser</div>
-  <h1 id="hello">Welcome</h1>
-  <p class="sub">Search with DuckDuckGo or type a web address.</p>
+  <div class="brand">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M4 5h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-5 4v-4H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/><text x="12" y="16.5" font-family="Source Serif 4, Georgia, serif" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor" stroke="none">C</text></svg>
+    </div>
+    <div><div class="brand-name">Cipher</div><div class="brand-sub">browser</div></div>
+    <button class="theme" id="theme" type="button">Light</button>
+  </div>
+
+  <p class="eyebrow" id="eyebrow"></p>
+  <h1 id="hello">Welcome to <em>Cipher</em></h1>
 
   <form id="f">
     <input id="q" placeholder="Search or enter a URL" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus>
     <button class="go">Go</button>
   </form>
 
-  <div class="label">Social</div>
-  <div class="grid">
-    <a class="tile" href="#" data-u="https://www.instagram.com"><span class="ico" style="background:linear-gradient(45deg,#f9a03f,#e1306c,#833ab4)">Ig</span>Instagram</a>
-    <a class="tile" href="#" data-u="https://www.tiktok.com"><span class="ico" style="background:#111;border:1px solid #333">Tk</span>TikTok</a>
-    <a class="tile" href="#" data-u="https://www.youtube.com"><span class="ico" style="background:#ff0033">Yt</span>YouTube</a>
-    <a class="tile" href="#" data-u="https://x.com"><span class="ico" style="background:#000;border:1px solid #333">X</span>X</a>
-    <a class="tile" href="#" data-u="https://www.reddit.com"><span class="ico" style="background:#ff4500">Rd</span>Reddit</a>
-    <a class="tile" href="#" data-u="https://discord.com/app"><span class="ico" style="background:#5865f2">Dc</span>Discord</a>
-    <a class="tile" href="#" data-u="https://www.snapchat.com"><span class="ico" style="background:#f7d600;color:#111">Sc</span>Snapchat</a>
-  </div>
+  <section class="row">
+    <h3>Social<span>Jump straight into your feeds</span></h3>
+    <div class="grid">
+      <a class="tile" href="#" data-u="https://www.instagram.com"><span class="ico">Ig</span>Instagram</a>
+      <a class="tile" href="#" data-u="https://www.tiktok.com"><span class="ico">Tk</span>TikTok</a>
+      <a class="tile" href="#" data-u="https://www.youtube.com"><span class="ico">Yt</span>YouTube</a>
+      <a class="tile" href="#" data-u="https://x.com"><span class="ico">X</span>X</a>
+      <a class="tile" href="#" data-u="https://www.reddit.com"><span class="ico">Rd</span>Reddit</a>
+      <a class="tile" href="#" data-u="https://discord.com/app"><span class="ico">Dc</span>Discord</a>
+      <a class="tile" href="#" data-u="https://www.snapchat.com"><span class="ico">Sc</span>Snapchat</a>
+    </div>
+  </section>
 
-  <div class="label">Games</div>
-  <div class="grid">
-    <a class="tile" href="#" data-u="https://www.crazygames.com"><span class="ico" style="background:linear-gradient(135deg,#7b4dff,#c94bff)">Cg</span>CrazyGames</a>
-  </div>
+  <section class="row">
+    <h3>Games<span>Take a break</span></h3>
+    <div class="grid">
+      <a class="tile" href="#" data-u="https://www.crazygames.com"><span class="ico">Cg</span>CrazyGames</a>
+    </div>
+  </section>
 
-  <small>Works best on simple sites. Big apps and games may load slowly or not at all.</small>
+  <p class="note">Works best on simple sites. Big apps and games may load slowly or not at all.</p>
 </main>
+<div class="wm" aria-hidden="true"><i></i>Cipher</div>
 <script>
   (function () {
-    var h = new Date().getHours();
+    var d = new Date(), h = d.getHours();
     var g = h < 5 ? 'Up late?' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
-    document.getElementById('hello').textContent = g + ', welcome to Cipher';
+    document.getElementById('eyebrow').textContent = d.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' }) + ' · ' + g;
+    var root = document.documentElement, btn = document.getElementById('theme');
+    function label() { btn.textContent = root.getAttribute('data-theme') === 'dark' ? 'Light' : 'Dark'; }
+    label();
+    btn.addEventListener('click', function () {
+      var t = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', t);
+      try { localStorage.setItem('cipher-theme', t); } catch (e) {}
+      label();
+    });
   })();
   function go(v) {
     v = (v || '').trim(); if (!v) return;
     var url;
     if (/^https?:\/\//i.test(v)) url = v;
     else if (/^[\w-]+(\.[\w-]+)+(:\d+)?(\/.*)?$/.test(v)) url = 'https://' + v;
-    else url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(v);
+    else { location.href = '/search?q=' + encodeURIComponent(v); return; }
     location.href = '/p/' + encodeURIComponent(url);
   }
   document.getElementById('f').addEventListener('submit', function (e) { e.preventDefault(); go(document.getElementById('q').value); });

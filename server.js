@@ -265,7 +265,38 @@ function serveStatic(req, res) {
   });
 }
 
+
+// ---------- search: DuckDuckGo first, fall back if the host blocks it ----------
+const ENGINES = [
+  q => 'https://html.duckduckgo.com/html/?q=' + q,
+  q => 'https://lite.duckduckgo.com/lite/?q=' + q,
+  q => 'https://www.bing.com/search?q=' + q,
+  q => 'https://search.brave.com/search?q=' + q,
+];
+const engineDown = new Map(); // engine index -> skip until (ms)
+let lastGood = -1, lastGoodUntil = 0;
+async function handleSearch(req, res) {
+  const q = (new URL(req.url, 'http://x').searchParams.get('q') || '').trim();
+  if (!q) { res.writeHead(302, { location: '/' }); return res.end(); }
+  const eq = encodeURIComponent(q);
+  let chosen = -1;
+  if (lastGood >= 0 && lastGoodUntil > Date.now()) chosen = lastGood;
+  for (let i = 0; chosen < 0 && i < ENGINES.length; i++) {
+    if ((engineDown.get(i) || 0) > Date.now()) continue;
+    try {
+      const r = await fetch(ENGINES[i](eq), { headers: { ...BASE_HEADERS, accept: 'text/html' }, redirect: 'manual', signal: AbortSignal.timeout(4000) });
+      const t = await r.text();
+      if (r.status === 200 && !/anomaly|captcha|unusual traffic/i.test(t)) { chosen = i; lastGood = i; lastGoodUntil = Date.now() + 5 * 60e3; break; }
+      engineDown.set(i, Date.now() + 5 * 60e3);
+    } catch { engineDown.set(i, Date.now() + 5 * 60e3); }
+  }
+  if (chosen < 0) chosen = ENGINES.length - 1;
+  res.writeHead(302, { location: PREFIX + encodeURIComponent(ENGINES[chosen](eq)) });
+  res.end();
+}
+
 http.createServer((req, res) => {
   if (req.url.startsWith(PREFIX)) return handleProxy(req, res).catch(e => { try { res.writeHead(500); res.end('Error: ' + e.message); } catch {} });
+  if (req.url.startsWith('/search')) return handleSearch(req, res).catch(() => { res.writeHead(302, { location: '/' }); res.end(); });
   serveStatic(req, res);
 }).listen(PORT, () => console.log('Prism running on http://localhost:' + PORT));
