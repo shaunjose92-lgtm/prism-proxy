@@ -1,0 +1,8 @@
+{
+  "name": "my-proxy",
+  "version": "1.0.0",
+  "description": "A small web proxy with zero dependencies",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=20" }
+}
